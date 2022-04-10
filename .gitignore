@@ -1,9 +1,15 @@
 # log and data
 data/glue_data/
 bert-ft/
+lora-ft/
+roberta-ft/
+test/
 tb_logs/
+.txt
+.log
 
 # Byte-compiled / optimized / DLL files
+.ipynb
 __pycache__/
 *.py[cod]
 *$py.class
