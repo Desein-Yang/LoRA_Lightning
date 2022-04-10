@@ -321,9 +321,8 @@ class LoraBertFinetuner(pl.LightningModule):
 
     def configure_callbacks(self):
         early_stop = EarlyStopping(monitor="val_acc", mode="max")
-        pdb.set_trace()
         ckpt = ModelCheckpoint(
-            self.logger.log_dir, save_top_k=-1, verbose=True, 
+            self.logger[0].log_dir, save_top_k=-1, verbose=True, 
             save_on_train_epoch_end=True, 
             monitor='val_accu', mode='max'
         )
