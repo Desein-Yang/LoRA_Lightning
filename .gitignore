@@ -4,12 +4,15 @@ bert-ft/
 lora-ft/
 roberta-ft/
 test/
+test*
 tb_logs/
-.txt
-.log
+*.txt
+*.log
+model/*
+
 
 # Byte-compiled / optimized / DLL files
-.ipynb
+*.ipynb
 __pycache__/
 *.py[cod]
 *$py.class

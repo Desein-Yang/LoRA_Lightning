@@ -53,9 +53,7 @@ def main():
     )
     trainer.fit(bert_finetuner)
     bert_finetuner.save_lora_params()
-    # trainer.save_checkpoint(logdir + "/" + args.run_id + "/last_model.ckpt")
     trainer.test()
-    # trainer.test(model,ckpt_path=logdir+"/last_model.ckpt")
 
 if __name__ == "__main__":
     main()

@@ -20,3 +20,5 @@ bash run_lora.sh
   - 新增 Lora Linear 和 Embedding 层
   - 新增 add/sum_trainable params()
   - 新增 optimizer 输出 log (优化 delta 分布)
+  - 新增 README.md
+  - 调试收敛正常成功，复现结果 91.3%

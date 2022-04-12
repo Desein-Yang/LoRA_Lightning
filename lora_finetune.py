@@ -46,6 +46,9 @@ class LoraBertFinetuner(pl.LightningModule):
             self.add_trainable_params(args.lora_path)
             print("add lora layers")
 
+            # if use manual opt
+            self.automatic_optimization = False
+
         # classifier (2 classes)
         self.num_classes = 2
         self.W = nn.Linear(self.bert.config.hidden_size, 2)
@@ -74,6 +77,10 @@ class LoraBertFinetuner(pl.LightningModule):
 
         module_list = self.get_module_list()
         for submodule_key in module_list:
+
+            # load the original state dict
+            module_state_dict = self.base_model.get_submodule(submodule_key).state_dict()
+
             # source code of loralib only replace query and value
             if submodule_key.split('.')[-1] in ["query","value"]: # Linear should be replaced    
                 submodule = self.base_model.get_submodule(submodule_key)
@@ -85,18 +92,21 @@ class LoraBertFinetuner(pl.LightningModule):
                     lora_dropout = 0.1
                 )
 
-                # initial weight by lora
-                lora_layer.reset_parameters()
+                lora_layer.load_state_dict(module_state_dict,strict=False)
+                # params reset in __init__
+
+                for n,p in lora_layer.named_parameters():
+                    if 'lora' in n:
+                        p.requires_grad = True
 
                 _set_module(self.base_model, submodule_key, lora_layer)
                 
-                print("Replace " + submodule_key + " with lora linear")
+                #print("Replace " + submodule_key + " with lora linear")
         #pdb.set_trace()
         # print keys of lora state dict
         print("Lora state dict keys" + str(lora_state_dict(self.bert.base_model).keys()))
 
     # add embedding by get_module
-    # do not use now
     def apply_lora_embedding(self):
         module_list =self.get_module_list()
         for name in module_list:
@@ -120,13 +130,21 @@ class LoraBertFinetuner(pl.LightningModule):
         
         return module_list
 
+    # deprecated 
     def add_trainable_params(self, lora_path):
         model = self.bert.base_model
 
         for name, param in model.named_parameters():
-            if "lora_" in name:
+            if "bert" or "roberta" in name:
+                if "lora_" in name:
+                    param.requires_grad = True
+                else:
+                    param.require_grad = False
+            else:
                 param.requires_grad = True
-                print("Add " + name + " as trainable params")
+        
+        #print("Add " + name + " as trainable params")
+
         # trainable_params = []
         # # add lora as trainable params
         # if self.apply_lora:
@@ -148,11 +166,8 @@ class LoraBertFinetuner(pl.LightningModule):
         #                 param.requires_grad = True
         #                 print("Add " + name + " as trainable params")
 
-        if self.sum_trainable_params() == 0:
-            print("No trainable params")
-            pdb.set_trace()
-        else:
-            print("Sum of trainable params: " + str(self.sum_trainable_params()))
+        assert self.sum_trainable_params() != 0
+        print("Sum of trainable params: " + str(self.sum_trainable_params()))
 
     def sum_trainable_params(self):
         return sum(p.numel() for p in self.base_model.parameters() if p.requires_grad)
@@ -166,13 +181,22 @@ class LoraBertFinetuner(pl.LightningModule):
         print(lora_dict.keys())
         torch.save(lora_dict, checkpoint_path)
         print("Save lora params to " + checkpoint_path)
-        print("Lora dict"+str(lora_dict.keys()))
+        print("Lora dict "+str(lora_dict.keys()))
+
+    def get_flatten_params(self):
+        state_dict = self.bert.base_model.state_dict()
+        flatten_params = torch.tensor([])
+        for key in state_dict.keys():
+            torch.cat([
+                flatten_params,
+                torch.flatten(state_dict[key])
+            ])
+        return flatten_params
 
     def log_opt(self):
-        opt = self.optimizers()
-        #logdir = self.logger().logdir
+
         if self.last_params:
-            self.curr_params = opt.param_groups[0]['params']
+            self.curr_params = self.get_flatten_params()
             for l,c in zip(self.last_params,self.curr_params):
                 delta = torch.sub(c,l)
 
@@ -182,9 +206,11 @@ class LoraBertFinetuner(pl.LightningModule):
                     "delta_mean": delta.mean(),
                     "delta_sum": delta.sum()
                 })
+            
+            self.last_params = self.curr_params
                      
         else:
-            self.last_params = opt.param_groups[0]['params']
+            self.last_params = self.get_flatten_params()
 
     def forward(self, input_ids, attention_mask, token_type_ids):
         h_cls = self.bert(
@@ -198,47 +224,36 @@ class LoraBertFinetuner(pl.LightningModule):
             token_type_ids=token_type_ids,
         )[2]
         logits = self.W(h_cls)
+
         # output = self.bert(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
         return logits, attn
 
+    # Manual Optimization
+    # torch lightning don't use the train eval in loralib/layer (why?)
+    # replace training step
     def training_step(self, batch, batch_nb):
+        opt = self.optimizers()
+        opt.zero_grad()
+
         input_ids, attention_mask, token_type_ids, label = batch
         y_hat, attn = self.forward(input_ids, attention_mask, token_type_ids)
         loss = F.cross_entropy(y_hat, label)
+        # loss.requires_grad_(True)
         
+        loss.backward(create_graph=True)
+        # self.manual_backward(loss)
+    
+        opt.step()
+
         tensorboard_logs = {"train_loss": loss}
         self.log("loss",loss, logger=True, prog_bar=True)
         
         scheduler = self.lr_schedulers()
         self.log("lr", scheduler.get_last_lr()[0], logger=True, prog_bar=True)
-
-        return {"loss": loss.detach(), "log": tensorboard_logs}
-
-    def on_train_epoch_end(self):
+        
         self.log_opt()
 
-    # TODO: deprecated modify optimizer
-    def selfopt_training_step(self, batch, batch_nb):
-        optim = self.optimizer()
-        optim.zero_grad()
-
-        # self.compute_loss(batch)
-        input_ids, attention_mask, token_type_ids, label = batch
-        y_hat, attn = self.forward(input_ids, attention_mask, token_type_ids)
-        loss = F.cross_entropy(y_hat, label)
-
-        self.manual_backward(loss)
-
-        # update lr every N epoch
-        sch = self.lr_schedulers()
-        if (batch_nb + 1) % N == 0:
-            sch.step()
-        if self.trainer.is_last_batch and (self.trainer.current_epoch + 1) % N == 0:
-            sch.step()
-
-        tensorboard_logs = {"train_loss": loss}
-        self.log("loss", loss, logger=True, prog_bar=True)
-        return {"loss": loss, "log": tensorboard_logs}
+        return {"loss": loss.detach(), "log": tensorboard_logs}
 
     def validation_step(self, batch, batch_nb):
         input_ids, attention_mask, token_type_ids, label = batch
@@ -300,13 +315,17 @@ class LoraBertFinetuner(pl.LightningModule):
         num_trainable_params = sum([p.numel() for p in self.parameters() if p.requires_grad]) / 1e6
         print("Num trainable params: " + str(num_trainable_params))
         
+
         optimizer = torch.optim.Adam(
             [p for p in self.parameters() if p.requires_grad], lr=self.lr, eps=1e-08
         )
+        self.last_params = None
 
         # Add warmup scheduler Lora
         self.total_steps = get_total_opt_steps()
         self.warmup_steps = int(self.total_steps * self.warmup_ratio)
+
+        self.warmup_steps = 0
         scheduler = get_linear_schedule_with_warmup(
             optimizer=optimizer,
             num_warmup_steps=self.warmup_steps,
@@ -318,9 +337,24 @@ class LoraBertFinetuner(pl.LightningModule):
             "frequency": 1
         }
         return [optimizer], [scheduler]
+        
+    # # function hook in LightningModule
+    # def optimizer_step(
+    #     self,
+    #     epoch,
+    #     batch_idx,
+    #     optimizer,
+    #     optimizer_idx,
+    #     optimizer_closure,
+    #     on_tpu=False,
+    #     using_native_amp=False,
+    #     using_lbfgs=False,
+    # ):
+    #     optimizer.step(closure=optimizer_closure) 
+    #     print("optimizer steps")
 
     def configure_callbacks(self):
-        early_stop = EarlyStopping(monitor="val_acc", mode="max")
+        early_stop = EarlyStopping(monitor="val_accu", mode="max")
         ckpt = ModelCheckpoint(
             self.logger[0].log_dir, save_top_k=-1, verbose=True, 
             save_on_train_epoch_end=True, 
@@ -328,9 +362,21 @@ class LoraBertFinetuner(pl.LightningModule):
         )
         return [early_stop,ckpt]
 
+    # def optimizer_step(
+    #     self,
+    #     epoch,
+    #     batch_idx,
+    #     optimizer,
+    #     optimizer_idx,
+    #     optimizer_closure,
+    #     on_tpu=False,
+    #     using_native_amp=False,
+    #     using_lbfgs=False,
+    # ):
+    #     optimizer.step(closure=optimizer_closure)
+
     # @pl.data_loader
     def train_dataloader(self):
-        #    print(type(self.dataset.train_dataloader()))
         return self.dataset.train_dataloader()
 
     # @pl.data_loader
