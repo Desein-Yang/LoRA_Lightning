@@ -9,36 +9,40 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 from memory_profiler import profile
 
-parser = ArgumentParser()
-# parser = Trainer.add_argparse_args(parser)
-parser.add_argument("--run_id", default="runs", help="runs name", type=str)
-parser.add_argument("--task", default="sst2", help="task", type=str)
-parser.add_argument("--batch", default=32, help="batch size", type=int)
-parser.add_argument("--lr", default=2e-5, help="learning rate", type=float)
-parser.add_argument("--warmup_ratio", default=0.06, help="warmup learning rate", type=float)
-parser.add_argument("--epoch", default=3, help="epoch", type=int)
-parser.add_argument("--gpus", default=1, help="gpus", type=int)
-parser.add_argument("--lora", default=True, help="lora", type=bool)
-parser.add_argument("--alpha", default=0.1, help="alpha", type=float)
-parser.add_argument("--r", default=1, help="r", type=int)
-parser.add_argument("--lora_path", default=None, help="lora path",type=str)
-parser.add_argument("--max_seq_length", default=128, help="lora path",type=int)
+def load_config(from_config=True,config_name='config.ini'):
+    parser = ArgumentParser()
+    # parser = Trainer.add_argparse_args(parser)
+    parser.add_argument("--run_id", default="runs", help="runs name", type=str)
+    parser.add_argument("--task", default="sst2", help="task", type=str)
+    parser.add_argument("--batch", default=32, help="batch size", type=int)
+    parser.add_argument("--lr", default=2e-5, help="learning rate", type=float)
+    parser.add_argument("--warmup_ratio", default=0.06, help="warmup learning rate", type=float)
+    parser.add_argument("--warmup_steps", default=0, help="warmup learning rate", type=int)
+    parser.add_argument("--epoch", default=3, help="epoch", type=int)
+    parser.add_argument("--gpus", default=1, help="gpus", type=int)
+    parser.add_argument("--lora", default=True, help="lora", type=bool)
+    parser.add_argument("--alpha", default=0.1, help="alpha", type=float)
+    parser.add_argument("--r", default=1, help="r", type=int)
+    parser.add_argument("--lora_path", default=None, help="lora path",type=str)
+    parser.add_argument("--max_seq_length", default=128, help="lora path",type=int)
 
-from_config = True
-if from_config:
-    config = ConfigParser()
-    config.read('./config/config.ini')
-    args_list = []
-    for k,v in config['train'].items():
-        args_list.append('--'+k)
-        args_list.append(v)
+    # only when you can't use command line(overwrite cmd)
+    if from_config:
+        config = ConfigParser()
+        config.read('./config/'+config_name)
+        args_list = []
+        for k,v in config['train'].items():
+            args_list.append('--'+k)
+            args_list.append(v)
 
-    args = parser.parse_args(args_list)
-else:
-    args = parser.parse_args()
+        args = parser.parse_args(args_list)
+    else:
+        args = parser.parse_args()
+    
+    return args
 
 @profile(precision=4, stream=open("memory_profiler.txt", "w+"))
-def main():
+def main(args):
     bert_finetuner = LoraBertFinetuner(args)
 
     logdir = "lora-ft/"
@@ -56,7 +60,11 @@ def main():
     trainer.test()
 
 if __name__ == "__main__":
-    main()
+    # True if run from python run_lora.py
+    # Flase if run from bash run_lora.sh
+    args = load_config(True)
+
+    main(args)
     
 #with torch.autograd.profiler.profile(enabled=True, use_cuda=True, record_shapes=False, profile_memory=False) as prof:
 #     bert_finetuner.train_dataloader()

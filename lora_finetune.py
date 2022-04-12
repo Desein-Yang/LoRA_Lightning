@@ -1,7 +1,6 @@
 import pdb, os
 from sched import scheduler
 import torch
-from loralib.utils import lora_state_dict
 from loralib.layers import Linear
 import pytorch_lightning as pl
 from sklearn.metrics import accuracy_score
@@ -24,6 +23,7 @@ class LoraBertFinetuner(pl.LightningModule):
 
         # params about finetune
         self.lr = args.lr
+        self.warmup_steps = args.warmup_steps
         self.warmup_ratio = args.warmup_ratio
         self.args = args
 
@@ -33,6 +33,7 @@ class LoraBertFinetuner(pl.LightningModule):
         )
         self.base_model = self.bert.base_model
         self.config = self.bert.config
+        self.bert.to(self.device)
 
         for p in self.base_model.parameters():
             p.requires_grad = False
@@ -77,7 +78,6 @@ class LoraBertFinetuner(pl.LightningModule):
 
         module_list = self.get_module_list()
         for submodule_key in module_list:
-
             # load the original state dict
             module_state_dict = self.base_model.get_submodule(submodule_key).state_dict()
 
@@ -100,11 +100,10 @@ class LoraBertFinetuner(pl.LightningModule):
                         p.requires_grad = True
 
                 _set_module(self.base_model, submodule_key, lora_layer)
-                
                 #print("Replace " + submodule_key + " with lora linear")
-        #pdb.set_trace()
+
         # print keys of lora state dict
-        print("Lora state dict keys" + str(lora_state_dict(self.bert.base_model).keys()))
+        # print("Lora state dict keys" + str(self.lora_state_dict(self.bert.base_model).keys()))
 
     # add embedding by get_module
     def apply_lora_embedding(self):
@@ -130,7 +129,6 @@ class LoraBertFinetuner(pl.LightningModule):
         
         return module_list
 
-    # deprecated 
     def add_trainable_params(self, lora_path):
         model = self.bert.base_model
 
@@ -166,40 +164,37 @@ class LoraBertFinetuner(pl.LightningModule):
         #                 param.requires_grad = True
         #                 print("Add " + name + " as trainable params")
 
-        assert self.sum_trainable_params() != 0
-        print("Sum of trainable params: " + str(self.sum_trainable_params()))
+        assert self.sum_trainable_params(model) != 0
+        print("Sum of trainable params: " + str(self.sum_trainable_params(model)))
 
-    def sum_trainable_params(self):
-        return sum(p.numel() for p in self.base_model.parameters() if p.requires_grad)
+    @staticmethod
+    def sum_trainable_params(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    @staticmethod
+    def lora_state_dict(my_state_dict):
+        return {k: my_state_dict[k] for k in my_state_dict if "lora_" in k}
 
     def save_lora_params(self,checkpoint_path=None):
         model = self.bert.base_model
-        if checkpoint_path is None:
-            checkpoint_path = self.lora_path
+        if checkpoint_path is None:       
+            checkpoint_path = "./lora-ft/lora_params_0.ckpt"
 
-        lora_dict = lora_state_dict(model)
-        print(lora_dict.keys())
+        lora_dict = self.lora_state_dict(model.state_dict())
         torch.save(lora_dict, checkpoint_path)
         print("Save lora params to " + checkpoint_path)
-        print("Lora dict "+str(lora_dict.keys()))
+        print("Lora dict is "+str(lora_dict.keys()))
 
     def get_flatten_params(self):
-        state_dict = self.bert.base_model.state_dict()
-        flatten_params = torch.tensor([])
-        for key in state_dict.keys():
-            torch.cat([
-                flatten_params,
-                torch.flatten(state_dict[key])
-            ])
-        return flatten_params
+        state_dict = self.base_model.state_dict()
+        params_list = [state_dict[key].flatten() for key in state_dict.keys()]
+        return torch.cat(params_list)
 
     def log_opt(self):
-
-        if self.last_params:
+        if self.last_params is not None:
             self.curr_params = self.get_flatten_params()
-            for l,c in zip(self.last_params,self.curr_params):
-                delta = torch.sub(c,l)
-
+            delta = torch.sub(self.curr_params,self.last_params)
+            
             self.log_dict({
                     "delta_max": delta.max(),
                     "delta_min": delta.min(),
@@ -207,8 +202,7 @@ class LoraBertFinetuner(pl.LightningModule):
                     "delta_sum": delta.sum()
                 })
             
-            self.last_params = self.curr_params
-                     
+            self.last_params = self.curr_params                     
         else:
             self.last_params = self.get_flatten_params()
 
@@ -306,8 +300,7 @@ class LoraBertFinetuner(pl.LightningModule):
 
     def configure_optimizers(self):
         def get_total_opt_steps():
-            tb_size = self.train_dataloader().batch_size * max(1, self.args.gpus)
-            step_per_epoch =  len(self.train_dataloader().dataset) // tb_size 
+            step_per_epoch =  len(self.train_dataloader().dataset)
             return self.args.epoch * step_per_epoch
 
         print("Config Optimizer Adam with params:")
@@ -315,7 +308,6 @@ class LoraBertFinetuner(pl.LightningModule):
         num_trainable_params = sum([p.numel() for p in self.parameters() if p.requires_grad]) / 1e6
         print("Num trainable params: " + str(num_trainable_params))
         
-
         optimizer = torch.optim.Adam(
             [p for p in self.parameters() if p.requires_grad], lr=self.lr, eps=1e-08
         )
@@ -323,9 +315,9 @@ class LoraBertFinetuner(pl.LightningModule):
 
         # Add warmup scheduler Lora
         self.total_steps = get_total_opt_steps()
-        self.warmup_steps = int(self.total_steps * self.warmup_ratio)
+        if self.warmup_steps == 0:
+            self.warmup_steps = int(self.total_steps * self.warmup_ratio)
 
-        self.warmup_steps = 0
         scheduler = get_linear_schedule_with_warmup(
             optimizer=optimizer,
             num_warmup_steps=self.warmup_steps,
@@ -356,24 +348,12 @@ class LoraBertFinetuner(pl.LightningModule):
     def configure_callbacks(self):
         early_stop = EarlyStopping(monitor="val_accu", mode="max")
         ckpt = ModelCheckpoint(
-            self.logger[0].log_dir, save_top_k=-1, verbose=True, 
+            self.logger[0].save_dir+"/checkpoint-{epoch}.ckpt", 
+            save_top_k=-1, verbose=True, 
             save_on_train_epoch_end=True, 
             monitor='val_accu', mode='max'
         )
         return [early_stop,ckpt]
-
-    # def optimizer_step(
-    #     self,
-    #     epoch,
-    #     batch_idx,
-    #     optimizer,
-    #     optimizer_idx,
-    #     optimizer_closure,
-    #     on_tpu=False,
-    #     using_native_amp=False,
-    #     using_lbfgs=False,
-    # ):
-    #     optimizer.step(closure=optimizer_closure)
 
     # @pl.data_loader
     def train_dataloader(self):
