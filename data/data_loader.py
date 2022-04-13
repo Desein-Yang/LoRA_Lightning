@@ -70,7 +70,7 @@ class GLUE(Dataset):
 
     def __init__(
         self,
-        data_load_path: str = "./data/glue_data",
+        data_load_path: str = "/cognitive_comp/yangqi/data/glue_data",
         # model_name_or_path: str ='./model/distilbert-base-uncased',
         model_name_or_path: str = "bert-base-cased",
         task_name: str = "sst2",

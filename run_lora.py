@@ -1,11 +1,9 @@
-from gc import callbacks
 import pytorch_lightning as pl
-from lora_finetune import LoraBertFinetuner
+from finetuner import LoraBertFinetuner
 from pytorch_lightning import Trainer
 from argparse import ArgumentParser
 from configparser import ConfigParser
 from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
-from pytorch_lightning.callbacks import ModelCheckpoint
 
 from memory_profiler import profile
 
@@ -14,6 +12,7 @@ def load_config(from_config=True,config_name='config.ini'):
     # parser = Trainer.add_argparse_args(parser)
     parser.add_argument("--run_id", default="runs", help="runs name", type=str)
     parser.add_argument("--task", default="sst2", help="task", type=str)
+    parser.add_argument("--model_id", default="bert-base-cased", help="task", type=str)
     parser.add_argument("--batch", default=32, help="batch size", type=int)
     parser.add_argument("--lr", default=2e-5, help="learning rate", type=float)
     parser.add_argument("--warmup_ratio", default=0.06, help="warmup learning rate", type=float)
@@ -23,8 +22,12 @@ def load_config(from_config=True,config_name='config.ini'):
     parser.add_argument("--lora", default=True, help="lora", type=bool)
     parser.add_argument("--alpha", default=0.1, help="alpha", type=float)
     parser.add_argument("--r", default=1, help="r", type=int)
+    parser.add_argument("--log_dir", default=None, help="log path",type=str)
     parser.add_argument("--lora_path", default=None, help="lora path",type=str)
     parser.add_argument("--max_seq_length", default=128, help="lora path",type=int)
+    parser.add_argument("--early_stop", default=True, help="lora path",type=bool)
+    parser.add_argument("--model_check", default=True, help="lora path",type=bool)
+
 
     # only when you can't use command line(overwrite cmd)
     if from_config:
@@ -45,14 +48,13 @@ def load_config(from_config=True,config_name='config.ini'):
 def main(args):
     bert_finetuner = LoraBertFinetuner(args)
 
-    logdir = "lora-ft/"
-    tb_logger = TensorBoardLogger(logdir, name=args.run_id)
-    csv_logger = CSVLogger(logdir, name=args.run_id)
+    tb_logger = TensorBoardLogger(args.log_dir, name=args.run_id)
+    csv_logger = CSVLogger(args.log_dir, name=args.run_id)
 
     trainer = pl.Trainer(
         gpus=args.gpus,
         max_epochs=args.epoch,
-        default_root_dir=logdir,
+        default_root_dir=args.log_dir,
         logger=[tb_logger, csv_logger],
     )
     trainer.fit(bert_finetuner)
@@ -62,7 +64,7 @@ def main(args):
 if __name__ == "__main__":
     # True if run from python run_lora.py
     # Flase if run from bash run_lora.sh
-    args = load_config(True)
+    args = load_config(True,'lora-config.ini')
 
     main(args)
     

@@ -22,7 +22,12 @@ bash run_lora.sh
   - 新增 optimizer 输出 log (优化 delta 分布)
   - 新增 README.md
   - 调试收敛正常成功，复现结果 91.3%
-  - v1.3.1 Fix bugs : 
+  - v 1.3.1 Fix bugs : 
     - log_opt params 无法正确调用所有 delta, 新增 flatten_params 方法 
-    - warmup step 过大、计算优化步数多乘了 batchsize
+    - warmup lr scheduler 计算出错，没有 step()，修改后复现结果 92.55%
     - 其他优化，shell 脚本调整，删掉多余空行
+  - v 1.3.2 Merge Code and Keep Clean:
+    - 对照差异合并 Base 和 Lora 代码，统一 config 导入、model_id 识别和 warmup 机制
+    - 归纳为 finetuner module 导入
+    - 新增可控参数 max_seq_len, early_stop, model_check, model_id 等
+    - 解决遗留不够整洁的代码目录

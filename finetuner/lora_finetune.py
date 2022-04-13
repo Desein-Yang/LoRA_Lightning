@@ -1,13 +1,11 @@
 import pdb, os
-from sched import scheduler
 import torch
 from loralib.layers import Linear
 import pytorch_lightning as pl
 from sklearn.metrics import accuracy_score
 from data.data_loader import GLUEDataLoader
 
-from transformers import BertModel, BertTokenizer
-from transformers import get_linear_schedule_with_warmup
+from transformers import BertModel, BertTokenizer, RobertaModel
 import torch.nn as nn
 import loralib as lora
 import torch.nn.functional as F
@@ -18,25 +16,24 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 class LoraBertFinetuner(pl.LightningModule):
     def __init__(self, args, dataset=None):
         super(LoraBertFinetuner, self).__init__()
-        # do not automaticly optimize by grad
-        self.automatic_optimization = False
-
-        # params about finetune
+       # params about finetune
+        self.args = args
         self.lr = args.lr
         self.warmup_steps = args.warmup_steps
         self.warmup_ratio = args.warmup_ratio
-        self.args = args
-
+        self.model_id = args.model_id
+        
+        
         # model arch
-        self.bert = BertModel.from_pretrained(
-            "bert-base-cased", output_attentions=True
-        )
-        self.base_model = self.bert.base_model
-        self.config = self.bert.config
-        self.bert.to(self.device)
+        model_type = self.model_id.split('-')[0]
+        if model_type == 'bert':
+            self.bert = BertModel.from_pretrained(self.model_id, hidden_dropout_prob=0.1, output_attentions=True)
+        elif model_type == 'roberta':
+            self.bert = RobertaModel.from_pretrained(self.model_id, hidden_dropout_prob=0.1, output_attentions=True)
 
-        for p in self.base_model.parameters():
-            p.requires_grad = False
+        self.base_model = self.bert.base_model
+        print(self.bert.config)
+        self.bert.to(self.device)
         
         # params about lora
         self.apply_lora = args.lora
@@ -52,7 +49,8 @@ class LoraBertFinetuner(pl.LightningModule):
 
         # classifier (2 classes)
         self.num_classes = 2
-        self.W = nn.Linear(self.bert.config.hidden_size, 2)
+        self.W = torch.nn.Linear(self.bert.config.hidden_size, 2)
+        
 
         # load dataset
         if dataset:
@@ -131,17 +129,13 @@ class LoraBertFinetuner(pl.LightningModule):
 
     def add_trainable_params(self, lora_path):
         model = self.bert.base_model
+        for p in model.parameters():
+            p.requires_grad = False
 
         for name, param in model.named_parameters():
-            if "bert" or "roberta" in name:
-                if "lora_" in name:
-                    param.requires_grad = True
-                else:
-                    param.require_grad = False
-            else:
+            if "lora_" in name:
                 param.requires_grad = True
-        
-        #print("Add " + name + " as trainable params")
+            #print("Add " + name + " as trainable params")
 
         # trainable_params = []
         # # add lora as trainable params
@@ -178,7 +172,7 @@ class LoraBertFinetuner(pl.LightningModule):
     def save_lora_params(self,checkpoint_path=None):
         model = self.bert.base_model
         if checkpoint_path is None:       
-            checkpoint_path = "./lora-ft/lora_params_0.ckpt"
+            checkpoint_path = "./logs/lora-ft/lora_params_0.ckpt"
 
         lora_dict = self.lora_state_dict(model.state_dict())
         torch.save(lora_dict, checkpoint_path)
@@ -227,6 +221,7 @@ class LoraBertFinetuner(pl.LightningModule):
     # replace training step
     def training_step(self, batch, batch_nb):
         opt = self.optimizers()
+        sch = self.lr_schedulers()
         opt.zero_grad()
 
         input_ids, attention_mask, token_type_ids, label = batch
@@ -236,14 +231,14 @@ class LoraBertFinetuner(pl.LightningModule):
         
         loss.backward(create_graph=True)
         # self.manual_backward(loss)
-    
+
+        sch.step()
         opt.step()
 
         tensorboard_logs = {"train_loss": loss}
         self.log("loss",loss, logger=True, prog_bar=True)
         
-        scheduler = self.lr_schedulers()
-        self.log("lr", scheduler.get_last_lr()[0], logger=True, prog_bar=True)
+        self.log("lr", sch.get_last_lr()[0], logger=True, prog_bar=True)
         
         self.log_opt()
 
@@ -300,16 +295,21 @@ class LoraBertFinetuner(pl.LightningModule):
 
     def configure_optimizers(self):
         def get_total_opt_steps():
-            step_per_epoch =  len(self.train_dataloader().dataset)
+            # step_per_epoch =  len(self.train_dataloader().dataset)
+            step_per_epoch = self.args.batch * 128 # step = 4096 = 128 * 32
+            print("step per epoch: "+str(step_per_epoch))
             return self.args.epoch * step_per_epoch
-
+        
         print("Config Optimizer Adam with params:")
         # need not to change now (lora params also use adam)
         num_trainable_params = sum([p.numel() for p in self.parameters() if p.requires_grad]) / 1e6
         print("Num trainable params: " + str(num_trainable_params))
         
         optimizer = torch.optim.Adam(
-            [p for p in self.parameters() if p.requires_grad], lr=self.lr, eps=1e-08
+            [p for p in self.parameters() if p.requires_grad], 
+            lr=self.lr, 
+            betas=(0.9, 0.999),
+            eps=1e-08,
         )
         self.last_params = None
 
@@ -317,12 +317,24 @@ class LoraBertFinetuner(pl.LightningModule):
         self.total_steps = get_total_opt_steps()
         if self.warmup_steps == 0:
             self.warmup_steps = int(self.total_steps * self.warmup_ratio)
+        print("Lr warmup steps:" + str(self.warmup_steps))
+        print("Total steps:" + str(self.total_steps))
 
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer=optimizer,
-            num_warmup_steps=self.warmup_steps,
-            num_training_steps=self.total_steps,
-        )
+        # ref : torch.optim.LambdaLR/ get_linear_schedule_with_warmup
+        def warmup(warmup_steps, total_steps):
+            def lr_lambda(current_step):
+                if current_step < warmup_steps:
+                    return float(current_step) / float(max(1, warmup_steps))
+                return max(
+                    0.0, float(total_steps - current_step) / float(max(1, total_steps - warmup_steps))
+                ) 
+            return torch.optim.lr_scheduler.LambdaLR(
+                optimizer=optimizer,
+                lr_lambda=lr_lambda,
+                last_epoch=-1,
+            )
+            
+        scheduler = warmup(self.warmup_steps, self.total_steps)
         scheduler = {
             "scheduler": scheduler,
             "interval": "step",
@@ -330,30 +342,21 @@ class LoraBertFinetuner(pl.LightningModule):
         }
         return [optimizer], [scheduler]
         
-    # # function hook in LightningModule
-    # def optimizer_step(
-    #     self,
-    #     epoch,
-    #     batch_idx,
-    #     optimizer,
-    #     optimizer_idx,
-    #     optimizer_closure,
-    #     on_tpu=False,
-    #     using_native_amp=False,
-    #     using_lbfgs=False,
-    # ):
-    #     optimizer.step(closure=optimizer_closure) 
-    #     print("optimizer steps")
-
     def configure_callbacks(self):
-        early_stop = EarlyStopping(monitor="val_accu", mode="max")
-        ckpt = ModelCheckpoint(
-            self.logger[0].save_dir+"/checkpoint-{epoch}.ckpt", 
-            save_top_k=-1, verbose=True, 
-            save_on_train_epoch_end=True, 
-            monitor='val_accu', mode='max'
-        )
-        return [early_stop,ckpt]
+        callbacks = []
+        if self.args.early_stop:
+            early_stop = EarlyStopping(monitor="val_accu", mode="max")
+            callbacks.append(early_stop)
+        if self.args.model_check:
+            ckpt = ModelCheckpoint(
+                self.logger[0].save_dir,
+                filename="checkpoint-{epoch}-{val_loss:.2f}.ckpt", 
+                save_top_k=-1, verbose=True, 
+                save_on_train_epoch_end=True, 
+                monitor='val_accu', mode='max'
+            )
+            callbacks.append(ckpt)
+        return callbacks
 
     # @pl.data_loader
     def train_dataloader(self):
