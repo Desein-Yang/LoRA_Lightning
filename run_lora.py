@@ -27,7 +27,7 @@ def load_config(from_config=True,config_name='config.ini'):
     parser.add_argument("--max_seq_length", default=128, help="lora path",type=int)
     parser.add_argument("--early_stop", default=True, help="lora path",type=bool)
     parser.add_argument("--model_check", default=True, help="lora path",type=bool)
-
+    parser.add_argument("--test_only", default=False, help="lora path",type=bool)
 
     # only when you can't use command line(overwrite cmd)
     if from_config:
@@ -57,10 +57,12 @@ def main(args):
         default_root_dir=args.log_dir,
         logger=[tb_logger, csv_logger],
     )
-    trainer.fit(bert_finetuner)
-    bert_finetuner.save_lora_params()
-    trainer.test()
-
+    if not args.test_only:
+        trainer.fit(bert_finetuner)
+        bert_finetuner.save_lora_params(checkpoint_path="./logs/lora-ft/lora_params_last.ckpt")
+        trainer.test(ckpt_path='best',num_workers=16)
+    else: 
+        trainer.test(ckpt_path='best',num_workers=16)
 if __name__ == "__main__":
     # True if run from python run_lora.py
     # Flase if run from bash run_lora.sh

@@ -63,6 +63,31 @@ class LoraBertFinetuner(pl.LightningModule):
             )
         print("Config Dataset")
 
+    # decorator for record time
+    @staticmethod
+    def record_time(func,*args,**kwargs):
+        # warm up
+        with torch.no_grad():
+            for i in range(5):
+                func(*args,**kwargs)
+        
+        # synchronize cpu task ends
+        torch.cuda.synchronize()
+
+        # record time cuda Event
+        starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+
+        starter.record()
+        func(*args,**kwargs)
+        ender.record()
+
+        torch.cuda.synchronize()
+        curr = starter.elapsed_time(ender)
+
+        func_name = func.__name__
+        self.records[func_name] = curr
+        print(str(func_name) + ':' + str(curr))
+
     # add lora layer by get_submodule
     def apply_lora_linear(self, r, alpha):
         # replace submodule_key in model with module 
@@ -349,8 +374,8 @@ class LoraBertFinetuner(pl.LightningModule):
             callbacks.append(early_stop)
         if self.args.model_check:
             ckpt = ModelCheckpoint(
-                self.logger[0].save_dir,
-                filename="checkpoint-{epoch}-{val_loss:.2f}.ckpt", 
+                dirpath = self.logger[0].sub_dir,
+                filename="{epoch}-{val_loss:.2f}", 
                 save_top_k=-1, verbose=True, 
                 save_on_train_epoch_end=True, 
                 monitor='val_accu', mode='max'

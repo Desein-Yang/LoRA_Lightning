@@ -178,8 +178,8 @@ class BertFinetuner(pl.LightningModule):
             callbacks.append(early_stop)
         if self.args.model_check:
             ckpt = ModelCheckpoint(
-                self.logger[0].save_dir,
-                filename="checkpoint-{epoch}-{val_loss:.2f}.ckpt", 
+                dirpath = self.logger[0].sub_dir ,
+                filename="{epoch}-{val_loss:.2f}", 
                 save_top_k=-1, verbose=True, 
                 save_on_train_epoch_end=True, 
                 monitor='val_accu', mode='max'
