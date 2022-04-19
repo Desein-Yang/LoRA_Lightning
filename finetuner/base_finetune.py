@@ -67,7 +67,6 @@ class BertFinetuner(pl.LightningModule):
 
         # one-hot
         loss = F.cross_entropy(y_hat, label)
-
         scheduler = self.lr_schedulers()
         scheduler.step()
         self.log("lr", scheduler.get_last_lr()[0], logger=True, prog_bar=True)
@@ -124,46 +123,63 @@ class BertFinetuner(pl.LightningModule):
             "progress_bar": tensorboard_logs,
         }
 
-    def configure_optimizers(self):
-        def get_total_opt_steps():
-            # step_per_epoch =  len(self.train_dataloader().dataset)
-            step_per_epoch = 128 * self.args.batch # step = 4096 = 128 * 32
+    def get_total_opt_steps(self):
+        if self.args.max_updates == 0:
+            step_per_epoch =  len(self.train_dataloader().dataset) // self.train_dataloader().batch_size
             print("step per epoch: "+str(step_per_epoch))
-            return self.args.epoch * step_per_epoch        
+            return self.args.epoch * step_per_epoch
+        else: 
+            return self.args.max_updates
 
+    def configure_optimizers(self):
         num_trainable_params = sum([p.numel() for p in self.parameters() if p.requires_grad]) / 1e6
         print("Num trainable params = {} M".format(str(num_trainable_params)))
 
-        optimizer = torch.optim.Adam(
+        optimizer = torch.optim.AdamW(
             [p for p in self.parameters() if p.requires_grad],
             lr=self.lr,
-            betas=(0.9, 0.999),
-            eps=1e-08,
+            weight_decay=self.args.weight_decay,
+            betas=(0.9, 0.98),
+            eps=1e-06,
         )
         print("Config Optimizer Adam")
 
         # Add warmup scheduler Lora
-        self.total_steps = get_total_opt_steps()
+        self.total_steps = self.get_total_opt_steps()
         if self.warmup_steps == 0:
             self.warmup_steps = int(self.total_steps * self.warmup_ratio)
         print("Lr warmup steps = {}".format(str(self.warmup_steps)))
         print("Total steps = {}".format(str(self.total_steps)))
 
-        # ref: transformers/ get_linear_schedule_with_warmup
-        def warmup(warmup_steps, total_steps):
-            def lr_lambda(current_step):
+        def warmup_fn(warmup_steps, total_steps, type="linear"):
+            def linear(current_step):
                 if current_step < warmup_steps:
                     return float(current_step) / float(max(1, warmup_steps))
                 return max(
                     0.0, float(total_steps - current_step) / float(max(1, total_steps - warmup_steps))
                 ) 
-            return torch.optim.lr_scheduler.LambdaLR(
-                optimizer=optimizer,
-                lr_lambda=lr_lambda,
-                last_epoch=-1,
-            )
+
+            def poly(current_step):
+                if current_step < warmup_steps:
+                    return (current_step / warmup_steps) ** 2
+                return max(
+                    0.0, (float(total_steps - current_step) / float(max(1, total_steps - warmup_steps))) ** 2
+                )
+
+            if type == "linear":
+                lr_lambda = linear
+            else:
+                lr_lambda =  poly
+
+            return lr_lambda
             
-        scheduler = warmup(self.warmup_steps, self.total_steps)      
+        # ref: transformers/ get_linear_schedule_with_warmuip
+        lr_lambda = warmup_fn(self.warmup_steps,self.total_steps, type="linear")
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+                    optimizer=optimizer,
+                    lr_lambda=lr_lambda,
+                    last_epoch=-1,
+                    )     
         scheduler = {
             "scheduler": scheduler,
             "interval": "step",
@@ -180,7 +196,7 @@ class BertFinetuner(pl.LightningModule):
             ckpt = ModelCheckpoint(
                 dirpath = self.logger[0].sub_dir ,
                 filename="{epoch}-{val_loss:.2f}", 
-                save_top_k=-1, verbose=True, 
+                save_top_k=1, verbose=True, 
                 save_on_train_epoch_end=True, 
                 monitor='val_accu', mode='max'
             )
@@ -200,3 +216,10 @@ class BertFinetuner(pl.LightningModule):
     def test_dataloader(self):
         return self.dataset.test_dataloader()
 
+    # Apply Byte-Pair Encoding (BPE) to input text
+    # for dataset RTE
+    def byte_pair_encoding(self, text):
+        tokens = text.strip().split('\t')
+        sent1, sent2, target = tokens[1], tokens[2], tokens[3]
+        tokens = self.bert.encode(sent1, sent2)
+        return tokens

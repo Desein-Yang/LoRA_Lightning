@@ -43,9 +43,11 @@ class LoraBertFinetuner(pl.LightningModule):
             self.save_lora_params()
             self.add_trainable_params(args.lora_path)
             print("add lora layers")
-
-            # if use manual opt
-            self.automatic_optimization = False
+        else: 
+            model = self.bert.base_model
+            for p in model.parameters():
+                p.requires_grad = True
+        self.automatic_optimization = False
 
         # classifier (2 classes)
         self.num_classes = 2
@@ -318,48 +320,65 @@ class LoraBertFinetuner(pl.LightningModule):
             "progress_bar": tensorboard_logs,
         }
 
-    def configure_optimizers(self):
-        def get_total_opt_steps():
-            # step_per_epoch =  len(self.train_dataloader().dataset)
-            step_per_epoch = self.args.batch * 128 # step = 4096 = 128 * 32
+    def get_total_opt_steps(self):
+        if self.args.max_updates == 0:
+            step_per_epoch =  len(self.train_dataloader().dataset) // self.train_dataloader().batch_size
             print("step per epoch: "+str(step_per_epoch))
             return self.args.epoch * step_per_epoch
-        
+        else: 
+            return self.args.max_updates
+
+    def configure_optimizers(self):
         print("Config Optimizer Adam with params:")
         # need not to change now (lora params also use adam)
         num_trainable_params = sum([p.numel() for p in self.parameters() if p.requires_grad]) / 1e6
         print("Num trainable params: " + str(num_trainable_params))
         
-        optimizer = torch.optim.Adam(
+        optimizer = torch.optim.AdamW(
             [p for p in self.parameters() if p.requires_grad], 
             lr=self.lr, 
+            weight_decay=self.args.weight_decay,
             betas=(0.9, 0.999),
             eps=1e-08,
         )
         self.last_params = None
 
         # Add warmup scheduler Lora
-        self.total_steps = get_total_opt_steps()
+        self.total_steps = self.get_total_opt_steps()
         if self.warmup_steps == 0:
             self.warmup_steps = int(self.total_steps * self.warmup_ratio)
         print("Lr warmup steps:" + str(self.warmup_steps))
         print("Total steps:" + str(self.total_steps))
 
-        # ref : torch.optim.LambdaLR/ get_linear_schedule_with_warmup
-        def warmup(warmup_steps, total_steps):
-            def lr_lambda(current_step):
+        def warmup_fn(warmup_steps, total_steps, type="linear"):
+            def linear(current_step):
                 if current_step < warmup_steps:
                     return float(current_step) / float(max(1, warmup_steps))
                 return max(
                     0.0, float(total_steps - current_step) / float(max(1, total_steps - warmup_steps))
                 ) 
-            return torch.optim.lr_scheduler.LambdaLR(
-                optimizer=optimizer,
-                lr_lambda=lr_lambda,
-                last_epoch=-1,
-            )
+
+            def poly(current_step):
+                if current_step < warmup_steps:
+                    return (current_step / warmup_steps) ** 2
+                return max(
+                    0.0, (float(total_steps - current_step) / float(max(1, total_steps - warmup_steps))) ** 2
+                )
+
+            if type == "linear":
+                lr_lambda = linear
+            else:
+                lr_lambda =  poly
+
+            return lr_lambda
             
-        scheduler = warmup(self.warmup_steps, self.total_steps)
+        # ref: transformers/ get_linear_schedule_with_warmup
+        lr_lambda = warmup_fn(self.warmup_steps,self.total_steps, type="linear")
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+                    optimizer=optimizer,
+                    lr_lambda=lr_lambda,
+                    last_epoch=-1,
+                    )    
         scheduler = {
             "scheduler": scheduler,
             "interval": "step",

@@ -16,7 +16,7 @@ bash run_lora.sh
 - v1.2 支持 Roberta 模型 finetune
   - 新增学习率预热，通过参数 warmup ratio 和 step 调
   - 支持每个 epoch 保存最优 Checkpoint 
-- v1.3.0 支持 Lora 
+- v1.3 支持 Lora 低秩矩阵
   - 新增 Lora Linear 和 Embedding 层
   - 新增 add/sum_trainable params()
   - 新增 optimizer 输出 log (优化 delta 分布)
@@ -31,3 +31,9 @@ bash run_lora.sh
     - 归纳为 finetuner module 导入
     - 新增可控参数 max_seq_len, early_stop, model_check, model_id 等
     - 解决遗留不够整洁的代码目录
+  - v 1.3.3 Merge code and Keep Clean:
+    - 解决 lr scheduler 提前终止的 bug（多加了一个step）
+    - 在 lora finetuner 中统一支持不同模型和算法
+    - 确定了超参数设置
+- v1.4 支持自定义 ea optim 
+    - v1.4.0 支持自定义 optim 类(简单累加delta)
