@@ -37,3 +37,49 @@ bash run_lora.sh
     - 确定了超参数设置
 - v1.4 支持自定义 ea optim 
     - v1.4.0 支持自定义 optim 类(简单累加delta)
+      - 测试了 torch ddp
+      - 测试了 optimizer + torch dist 优化步骤正确
+      - 测试了 optimizer + lora finetune 
+
+
+## File Tree
+├── functions
+├── src
+│  ├── articles
+│  ├── components
+│  │  ├── builder
+│  │  │  ├── center
+│  │  │  ├── left
+│  │  │  │  └── sections
+│  │  │  ├── lists
+│  │  │  └── right
+│  │  │    └── sections
+│  │  ├── dashboard
+│  │  ├── landing
+│  │  ├── router
+│  │  └── shared
+│  └── constants
+└── static
+  └── images
+    ├── screenshots
+    └── templates
+
+# EA Optimizer Example
+```python
+#Import 
+from optim.evolution import EA
+from optim.utils import sync_params, sync_scalar
+
+#Build optim
+evo = EA([p for p in model.parameters()], lr=lr, select=use_select)
+
+#Optimize 
+for step in range(max_step):
+   evo.mutate()
+
+   loss = model(input)
+   
+   sync_loss = sync_scalar(loss, world_size)
+   sync_seed = sync_scalar(seed, world_size)
+   evo.step(sync_loss, sync_seed)
+```
