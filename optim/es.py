@@ -1,4 +1,6 @@
+from distutils.log import info
 import time
+import logging
 import torch
 import numpy as np
 import torch.distributed as dist
@@ -6,7 +8,7 @@ import torch.distributed as dist
 from torch import Tensor, tensor
 from typing import List, Optional
 from torch.optim import Optimizer
-from .utils import flatten_tensor_list, setup, cleanup, sync_scalar, sync_params
+from .utils import flatten_tensor_list
 
 # get 
 # optimizer = torch.optim.Adam(bert.parameters(),lr=0.01)
@@ -33,7 +35,7 @@ from .utils import flatten_tensor_list, setup, cleanup, sync_scalar, sync_params
 #    sync_loss = sync_scalar(loss, world_size)
 #    sync_seed = sync_scalar(seed, world_size)
 #    evo.step(sync_loss, sync_seed)
-class EA(Optimizer):
+class EvoStrategy(Optimizer):
     r"""Implements Evolution Strategy Algorithm
     
     .. math::
@@ -107,7 +109,10 @@ class EA(Optimizer):
         return params_no_grad
 
     @torch.no_grad()
-    def step(self, sync_loss, sync_seed, closure=None) -> Optional[float]:
+    def step(self, closure=None, **kwargs) -> Optional[float]:
+        sync_loss = kwargs['loss']
+        sync_seed = kwargs['seed']
+        
         # get the current params for optimize    
         params_no_grad = self.params_no_grad()
         for n, p in enumerate(params_no_grad):
@@ -168,21 +173,15 @@ class EA(Optimizer):
         return sync_loss
 
     @torch.no_grad()
-    def step_best(self, sync_loss, sync_seed=None, closure=None):
+    def step_best(self, params, sync_loss, sync_seed=None, closure=None):
          # modify state e.g., step
-        for group in self.param_groups:
-            params_no_grad = []
-            state_steps, weights, seeds = []
-
-            for p in group['params']:
-                # record state of opt
-                params_no_grad.append(p)
-            
-                state_steps.append(state['step'])
-        
-                # update params
-                selected = int(torch.argmax(sync_loss))# select a node
-                self._sync_param(p, selected) # sync model from selected node
+        for param_id, p in enumerate(params):
+            state = self.state[str(param_id)]
+            state['steps'] += 1
+    
+            # update params
+            selected = int(torch.argmax(sync_loss))# select a node
+            self._sync_param(p, selected) # sync model from selected node
         
         return sync_loss
 
@@ -235,7 +234,6 @@ class EA(Optimizer):
         self.log(f"Epsilon: {flatten_tensor_list(epsilon_l)}")
         #self.log_params("Mutated")
         
-
     def set_grad(self, require_grad=False):
         for group in self.param_groups:
             for p in group['params']:
@@ -247,13 +245,14 @@ class EA(Optimizer):
             self.log(self.state[key])
         self.log("==================================")
 
+    # only use for small model
     def log_params(self, msg):
         flatten_params = flatten_tensor_list(self.param_groups[0]['params'])
         self.log(f" {msg} Params: {flatten_params}")
 
     def log(self, msg):
         rank = self.rank
-        print(f"[{rank}] {msg}")
+        logging,info(f"[{rank}] {msg}")
 
     @staticmethod
     def _cal_weight(sync_loss : torch.Tensor):
