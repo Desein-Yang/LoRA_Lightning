@@ -1,9 +1,18 @@
-# Light Code for Parameter-efficient Finetune
+# EvoBert
+
+
+This is an implemention of
+- Bert Finetune
+- Low-Rank Finetune(A Parameter-efficient  Methods refers to https://github.com/microsoft/LoRA)
+- Low-Rank Evolution Finetune (A PyTorch Optimizer with Evolution Strategy)
+
 
 ## Usage
 
 ```bash
 bash run_lora.sh
+bash run_bert.sh
+bash run_es_lora.sh
 ```
 
 ## version
